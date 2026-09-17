@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>検索</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      padding: 16px;
+      background: #f7f7f7;
+      margin: 0;
+      color: #333;
+    }
+    h1 { font-size: 18px; margin: 0 0 16px; }
+
+    form {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    input[type="text"] {
+      flex: 1;
+      padding: 10px 12px;
+      font-size: 16px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      outline: none;
+    }
+    input[type="text"]:focus { border-color: #888; }
+
+    button {
+      padding: 10px 18px;
+      font-size: 16px;
+      cursor: pointer;
+      border: none;
+      border-radius: 6px;
+      background: #333;
+      color: #fff;
+    }
+    button:disabled {
+      background: #999;
+      cursor: not-allowed;
+    }
+
+    .status {
+      font-size: 14px;
+      color: #666;
+      padding: 8px 0;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 8px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+    }
+    .card a {
+      color: #222;
+      text-decoration: none;
+      font-size: 14px;
+      line-height: 1.5;
+      display: block;
+    }
+    .card a:hover { text-decoration: underline; }
+
+    .card .meta {
+      font-size: 12px;
+      color: #777;
+      margin-top: 8px;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .card .likes { color: #e05a7a; font-weight: 600; }
+
+    .pager {
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+      margin: 16px 0;
+    }
+    .pager button {
+      padding: 8px 14px;
+      font-size: 14px;
+      background: #fff;
+      color: #333;
+      border: 1px solid #ccc;
+    }
+    .pager button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+<body>
+  <h1>動画検索</h1>
+
+  <form id="search-form">
+    <input type="text" id="q" placeholder="キーワードを入力" autocomplete="off">
+    <button type="submit" id="submit-btn">検索</button>
+  </form>
+
+  <div class="status" id="status"></div>
+  <div id="results"></div>
+  <div class="pager" id="pager"></div>
+
+  <script>
+    const form = document.getElementById('search-form');
+    const input = document.getElementById('q');
+    const statusEl = document.getElementById('status');
+    const resultsEl = document.getElementById('results');
+    const pagerEl = document.getElementById('pager');
+    const submitBtn = document.getElementById('submit-btn');
+
+    let currentKeyword = '';
+    let currentPage = 1;
+    let hasNext = false;
+
+    // URL クエリ初期化
+    (function initFromUrl() {
+      const params = new URLSearchParams(location.search);
+      const q = params.get('q');
+      const p = parseInt(params.get('page') || '1', 10);
+      if (q) {
+        input.value = q;
+        doSearch(q, isNaN(p) ? 1 : p);
+      }
+    })();
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const q = input.value.trim();
+      if (!q) return;
+      doSearch(q, 1);
+    });
+
+    async function doSearch(keyword, page) {
+      currentKeyword = keyword;
+      currentPage = page;
+
+      // URL 反映
+      const params = new URLSearchParams();
+      params.set('q', keyword);
+      if (page > 1) params.set('page', String(page));
+      history.replaceState(null, '', `?${params.toString()}`);
+
+      submitBtn.disabled = true;
+      statusEl.textContent = '検索中...';
+      resultsEl.innerHTML = '';
+      pagerEl.innerHTML = '';
+
+      try {
+        const res = await fetch(
+          `/api/search?q=${encodeURIComponent(keyword)}&page=${page}`
+        );
+        const data = await res.json();
+
+        if (!res.ok) {
+          statusEl.textContent = `エラー: ${data.error || res.status}`;
+          return;
+        }
+
+        hasNext = !!data.hasNext;
+
+        if (!data.results || data.results.length === 0) {
+          statusEl.textContent = '該当なし';
+          return;
+        }
+
+        statusEl.textContent = `「${keyword}」の検索結果 ${data.results.length}件（${page}ページ目）`;
+
+        resultsEl.innerHTML = data.results
+          .map((item) => {
+            const safeTitle = escapeHtml(item.title);
+            return `
+              <div class="card">
+                <a href="/video.html?id=${encodeURIComponent(item.id)}">
+                  ${safeTitle}
+                </a>
+                <div class="meta">
+                  <span class="likes">♥ ${escapeHtml(String(item.likes))}</span>
+                  <span>${escapeHtml(item.ago)}</span>
+                  <span>ID: ${escapeHtml(item.id)}</span>
+                </div>
+              </div>
+            `;
+          })
+          .join('');
+
+        renderPager();
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = '通信エラーが発生しました';
+      } finally {
+        submitBtn.disabled = false;
+      }
+    }
+
+    function renderPager() {
+      pagerEl.innerHTML = '';
+
+      const prevBtn = document.createElement('button');
+      prevBtn.textContent = '前へ';
+      prevBtn.disabled = currentPage <= 1;
+      prevBtn.addEventListener('click', () => {
+        doSearch(currentKeyword, currentPage - 1);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      });
+
+      const nextBtn = document.createElement('button');
+      nextBtn.textContent = '次へ';
+      nextBtn.disabled = !hasNext;
+      nextBtn.addEventListener('click', () => {
+        doSearch(currentKeyword, currentPage + 1);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      });
+
+      pagerEl.appendChild(prevBtn);
+      pagerEl.appendChild(nextBtn);
+    }
+
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+  </script>
+</body>
+</html>
