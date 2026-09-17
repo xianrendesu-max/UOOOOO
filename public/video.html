@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>動画プレイヤー</title>
+
+<!-- HLS.js（Safari以外のブラウザでm3u8を再生するため） -->
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+
+<style>
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #000;
+    color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                 "Hiragino Kaku Gothic ProN", "Meiryo", sans-serif;
+  }
+
+  .wrap {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 12px;
+  }
+
+  .header {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    width: 100%;
+    padding-bottom: 5px;
+  }
+
+  .video_label {
+    width: 70%;
+    font-size: 16px;
+    text-align: left;
+    color: #fff;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .meta_time {
+    font-size: 12px;
+    color: #ccc;
+    padding-left: 8px;
+    white-space: nowrap;
+  }
+
+  .player_box {
+    position: relative;
+    width: 100%;
+    overflow: hidden;
+    padding-bottom: 56.25%; /* 16:9 */
+    background: #000;
+  }
+
+  .player_box video {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: #000;
+  }
+
+  .status {
+    margin-top: 10px;
+    font-size: 13px;
+    color: #bbb;
+    min-height: 18px;
+  }
+
+  .error {
+    color: #ff6b6b;
+  }
+
+  .info {
+    margin-top: 14px;
+    font-size: 13px;
+    color: #aaa;
+    line-height: 1.6;
+    word-break: break-all;
+  }
+
+  .info a {
+    color: #6cf;
+    text-decoration: none;
+  }
+
+  .info a:hover {
+    text-decoration: underline;
+  }
+
+  .actions {
+    margin-top: 14px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .actions a,
+  .actions button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px 14px;
+    font-size: 14px;
+    color: #fff;
+    background: #222;
+    border: 1px solid #444;
+    border-radius: 6px;
+    cursor: pointer;
+    text-decoration: none;
+  }
+
+  .actions a:hover,
+  .actions button:hover {
+    background: #333;
+  }
+
+  .source_select {
+    margin-top: 12px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    font-size: 13px;
+    color: #aaa;
+  }
+
+  .source_select select {
+    background: #222;
+    color: #fff;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 13px;
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <!-- タイトル行 -->
+  <div class="header">
+    <div class="video_label" id="video-label">読み込み中...</div>
+    <time id="video-time" class="meta_time"></time>
+  </div>
+
+  <!-- 動画プレイヤー -->
+  <div class="player_box">
+    <video
+      id="video"
+      preload="metadata"
+      controls
+      playsinline
+      loop
+    ></video>
+  </div>
+
+  <!-- ステータス表示 -->
+  <div class="status" id="status"></div>
+
+  <!-- 再生ソース切り替え -->
+  <div class="source_select" id="source-select-wrap" style="display:none;">
+    <label for="source-select">再生ソース:</label>
+    <select id="source-select">
+      <option value="">-- 選択 --</option>
+    </select>
+  </div>
+
+  <!-- 操作ボタン -->
+  <div class="actions">
+    <a href="/search.html">検索に戻る</a>
+    <a id="original-link" href="#" target="_blank" rel="noopener noreferrer">元ページを開く</a>
+    <button type="button" id="reload-btn">再読み込み</button>
+  </div>
+
+  <!-- デバッグ情報 -->
+  <div class="info" id="info"></div>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ───────────────────────────────────────────
+  // 要素の取得
+  // ───────────────────────────────────────────
+  const videoEl    = document.getElementById('video');
+  const labelEl    = document.getElementById('video-label');
+  const timeEl     = document.getElementById('video-time');
+  const statusEl   = document.getElementById('status');
+  const infoEl     = document.getElementById('info');
+  const selectWrap = document.getElementById('source-select-wrap');
+  const selectEl   = document.getElementById('source-select');
+  const originalLink = document.getElementById('original-link');
+  const reloadBtn  = document.getElementById('reload-btn');
+
+  // ───────────────────────────────────────────
+  // URLパラメータから動画IDを取得
+  // ───────────────────────────────────────────
+  const params  = new URLSearchParams(location.search);
+  const videoId = (params.get('id') || '').trim();
+
+  // HLSインスタンス（使い回し用）
+  let hls = null;
+
+  // 現在の動画データ
+  let currentData = null;
+
+  // ───────────────────────────────────────────
+  // ユーティリティ
+  // ───────────────────────────────────────────
+  function setStatus(text, isError) {
+    statusEl.textContent = text || '';
+    statusEl.classList.toggle('error', !!isError);
+  }
+
+  function destroyHls() {
+    if (hls) {
+      try { hls.destroy(); } catch (e) { /* noop */ }
+      hls = null;
+    }
+  }
+
+  function resetVideo() {
+    destroyHls();
+    videoEl.removeAttribute('src');
+    videoEl.load();
+  }
+
+  // ───────────────────────────────────────────
+  // IDが不正な場合
+  // ───────────────────────────────────────────
+  if (!/^\d+$/.test(videoId)) {
+    labelEl.textContent = 'エラー';
+    setStatus('動画IDが指定されていないか、不正です。URLに ?id=数字 を付けてください。', true);
+    videoEl.style.display = 'none';
+    return;
+  }
+
+  // ───────────────────────────────────────────
+  // 動画情報をAPIから取得
+  // ───────────────────────────────────────────
+  async function fetchVideoInfo() {
+    setStatus('動画情報を取得中...');
+    infoEl.textContent = '';
+
+    let data;
+    try {
+      const res = await fetch('/api/video-info?id=' + encodeURIComponent(videoId), {
+        headers: { 'Accept': 'application/json' }
+      });
+
+      if (!res.ok) {
+        throw new Error('APIエラー: HTTP ' + res.status);
+      }
+
+      data = await res.json();
+
+      if (data && data.error) {
+        throw new Error('APIエラー: ' + data.error);
+      }
+    } catch (err) {
+      console.error('[video] fetch error:', err);
+      labelEl.textContent = '取得失敗';
+      setStatus('動画情報の取得に失敗しました: ' + err.message, true);
+      return;
+    }
+
+    currentData = data;
+
+    // ─────────────────────────────────────────
+    // 表示更新
+    // ─────────────────────────────────────────
+    labelEl.textContent = data.title || ('動画ID: ' + videoId);
+    document.title = (data.title || '動画プレイヤー');
+
+    // 投稿日時（ページURLやAPIから取れない場合は省略）
+    timeEl.textContent = '';
+
+    // 元ページリンク
+    if (data.pageUrl) {
+      originalLink.href = data.pageUrl;
+    } else {
+      originalLink.href = 'https://xvideo-jp.com/sad/' + videoId;
+    }
+
+    // 情報エリア
+    const infoLines = [];
+    infoLines.push('動画ID: ' + videoId);
+    if (data.m3u8) infoLines.push('HLS: ' + data.m3u8);
+    if (data.mp4)  infoLines.push('MP4: ' + data.mp4);
+    if (data.poster) infoLines.push('Poster: ' + data.poster);
+    infoEl.innerHTML = infoLines
+      .map(function (line) {
+        // URL部分だけリンク化
+        const m = line.match(/^(.*?)(https?:\/\/\S+)$/);
+        if (m) {
+          return escapeHtml(m[1]) +
+            '<a href="' + escapeAttr(m[2]) + '" target="_blank" rel="noopener noreferrer">' +
+            escapeHtml(m[2]) + '</a>';
+        }
+        return escapeHtml(line);
+      })
+      .join('<br>');
+
+    // ポスター設定
+    if (data.poster) {
+      videoEl.setAttribute('poster', data.poster);
+    } else {
+      videoEl.removeAttribute('poster');
+    }
+
+    // ─────────────────────────────────────────
+    // 再生ソースを決定
+    // ─────────────────────────────────────────
+    const sources = [];
+    if (data.m3u8) sources.push({ type: 'hls', label: 'HLS (m3u8)', url: data.m3u8 });
+    if (data.mp4)  sources.push({ type: 'mp4', label: 'MP4',        url: data.mp4  });
+
+    if (sources.length === 0) {
+      setStatus('再生可能な動画ソースが見つかりませんでした。', true);
+      return;
+    }
+
+    // ソース選択UIを構築
+    selectEl.innerHTML = '';
+    sources.forEach(function (s, idx) {
+      const opt = document.createElement('option');
+      opt.value = String(idx);
+      opt.textContent = s.label;
+      selectEl.appendChild(opt);
+    });
+    selectWrap.style.display = sources.length > 1 ? 'flex' : 'none';
+
+    // 優先順位: HLS → MP4
+    const preferred = sources.find(function (s) { return s.type === 'hls'; }) || sources[0];
+    selectEl.value = String(sources.indexOf(preferred));
+
+    playSource(preferred, sources);
+  }
+
+  // ───────────────────────────────────────────
+  // 指定ソースを再生
+  // ───────────────────────────────────────────
+  function playSource(source, allSources) {
+    resetVideo();
+    setStatus('読み込み中... (' + source.label + ')');
+
+    if (source.type === 'hls') {
+      if (window.Hls && window.Hls.isSupported()) {
+        hls = new window.Hls({
+          // 低遅延より安定性を優先
+          lowLatencyMode: false,
+          enableWorker: true
+        });
+
+        hls.on(window.Hls.Events.MANIFEST_PARSED, function () {
+          setStatus('再生準備完了 (' + source.label + ')');
+        });
+
+        hls.on(window.Hls.Events.ERROR, function (event, data) {
+          console.error('[hls] error:', data);
+          if (data && data.fatal) {
+            switch (data.type) {
+              case window.Hls.ErrorTypes.NETWORK_ERROR:
+                setStatus('ネットワークエラー。再試行します...', true);
+                try { hls.startLoad(); } catch (e) { /* noop */ }
+                break;
+              case window.Hls.ErrorTypes.MEDIA_ERROR:
+                setStatus('メディアエラー。復旧を試みます...', true);
+                try { hls.recoverMediaError(); } catch (e) { /* noop */ }
+                break;
+              default:
+                setStatus('HLS再生エラー: ' + (data.details || 'unknown'), true);
+                destroyHls();
+                // MP4フォールバックがあれば切り替え
+                if (allSources) {
+                  const mp4 = allSources.find(function (s) { return s.type === 'mp4'; });
+                  if (mp4) {
+                    setStatus('MP4に切り替えます...', true);
+                    playSource(mp4, allSources);
+                  }
+                }
+                break;
+            }
+          }
+        });
+
+        hls.loadSource(source.url);
+        hls.attachMedia(videoEl);
+      } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+        // SafariなどネイティブHLS対応
+        videoEl.src = source.url;
+        videoEl.addEventListener('loadedmetadata', function onLoaded() {
+          videoEl.removeEventListener('loadedmetadata', onLoaded);
+          setStatus('再生準備完了 (ネイティブHLS)');
+        });
+      } else {
+        setStatus('このブラウザはHLSに対応していません。', true);
+        // MP4フォールバック
+        if (allSources) {
+          const mp4 = allSources.find(function (s) { return s.type === 'mp4'; });
+          if (mp4) {
+            setStatus('MP4に切り替えます...', true);
+            playSource(mp4, allSources);
+          }
+        }
+      }
+    } else {
+      // MP4
+      videoEl.src = source.url;
+      videoEl.addEventListener('loadedmetadata', function onLoaded() {
+        videoEl.removeEventListener('loadedmetadata', onLoaded);
+        setStatus('再生準備完了 (MP4)');
+      });
+      videoEl.addEventListener('error', function onErr() {
+        videoEl.removeEventListener('error', onErr);
+        setStatus('MP4の読み込みに失敗しました。', true);
+      });
+    }
+  }
+
+  // ───────────────────────────────────────────
+  // ソース切り替えUI
+  // ───────────────────────────────────────────
+  selectEl.addEventListener('change', function () {
+    if (!currentData) return;
+    const sources = [];
+    if (currentData.m3u8) sources.push({ type: 'hls', label: 'HLS (m3u8)', url: currentData.m3u8 });
+    if (currentData.mp4)  sources.push({ type: 'mp4', label: 'MP4',        url: currentData.mp4  });
+
+    const idx = parseInt(selectEl.value, 10);
+    if (isNaN(idx) || !sources[idx]) return;
+
+    playSource(sources[idx], sources);
+  });
+
+  // ───────────────────────────────────────────
+  // 再読み込みボタン
+  // ───────────────────────────────────────────
+  reloadBtn.addEventListener('click', function () {
+    fetchVideoInfo();
+  });
+
+  // ───────────────────────────────────────────
+  // エスケープ用ヘルパ
+  // ───────────────────────────────────────────
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+  function escapeAttr(s) {
+    return escapeHtml(s);
+  }
+
+  // ───────────────────────────────────────────
+  // 初期化
+  // ───────────────────────────────────────────
+  fetchVideoInfo();
+
+})();
+</script>
+
+</body>
+</html>
